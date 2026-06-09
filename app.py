@@ -189,7 +189,7 @@ with aba1:
             dt_s = st.date_input("Data Saída", datetime.now())
             hr_s = st.time_input("Hora Saída", datetime.now().time())
             
-        botao_salvar = st.form_submit_with_button("💾 Salvar no Banco de Dados", use_container_width=True)
+        botao_salvar = st.form_submit_button(label='Salvar')
 
     if botao_salvar:
         if placa and num_nota:

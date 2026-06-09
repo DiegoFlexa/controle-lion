@@ -2,24 +2,69 @@ import streamlit as st
 import datetime
 import pandas as pd
 import io
+import sqlite3
 
 # Configuração da página do aplicativo
 st.set_page_config(page_title="Controle Lion v2", page_icon="🚚", layout="wide")
 
 st.title("🚚 Controle Lion v2 - Gerenciamento de Pátio")
-st.write("Registre entradas e saídas de veículos digitando os horários manualmente.")
+st.write("Registre entradas e saídas de veículos de forma simultânea com salvamento permanente e cálculo de descarregamento.")
 
 # -----------------------------------------------------------------------------
-# BANCO DE DADOS EM MEMÓRIA (st.session_state)
+# BANCO DE DADOS PERMANENTE E ONLINE (SQLite)
 # -----------------------------------------------------------------------------
-if 'base_dados' not in st.session_state:
-    st.session_state.base_dados = pd.DataFrame(
-        columns=[
-            "Data_Entrada", "Hora_Entrada", "Placa", 
-            "Peso_Entrada", "Nota_Fiscal", 
-            "Data_Saida", "Hora_Saida", "Status"
-        ]
-    )
+def conectar_banco():
+    # Cria ou conecta ao arquivo de banco de dados para nunca perder os registros
+    conn = sqlite3.connect("dados_patio.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS patio (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            Data_Entrada TEXT,
+            Hora_Entrada TEXT,
+            Placa TEXT,
+            Peso_Entrada TEXT,
+            Nota_Fiscal TEXT,
+            Data_Saida TEXT,
+            Hora_Saida TEXT,
+            Status TEXT
+        )
+    """)
+    conn.commit()
+    return conn
+
+# Inicializa o banco de dados
+conn = conectar_banco()
+
+# Função para carregar os dados salvos do banco para o aplicativo
+def carregar_dados():
+    conn = sqlite3.connect("dados_patio.db")
+    df = pd.read_sql_query("SELECT * FROM patio", conn)
+    conn.close()
+    if df.empty:
+        return pd.DataFrame(columns=["id", "Data_Entrada", "Hora_Entrada", "Placa", "Peso_Entrada", "Nota_Fiscal", "Data_Saida", "Hora_Saida", "Status"])
+    return df
+
+# Função para calcular a diferença de tempo de descarregamento
+def calcular_tempo_descarregamento(hora_ent, hora_sai):
+    try:
+        # Tenta converter os textos digitados em formato de hora
+        t_ent = datetime.datetime.strptime(hora_ent.strip(), "%H:%M")
+        t_sai = datetime.datetime.strptime(hora_sai.strip(), "%H:%M")
+        
+        # Caso a saída tenha sido após a meia-noite (no dia seguinte)
+        if t_sai < t_ent:
+            t_sai += datetime.timedelta(days=1)
+            
+        diferenca = t_sai - t_ent
+        horas, resto = divmod(diferenca.seconds, 3600)
+        minutos, _ = divmod(resto, 60)
+        return f"{horas:02d}:{minutos:02d} hs"
+    except:
+        return "Em andamento"
+
+# Recarrega a base ativa a cada atualização da página
+base_dados = carregar_dados()
 
 # Criando duas colunas na tela: Lado esquerdo (Entrada) | Lado direito (Saída)
 col1, col2 = st.columns(2)
@@ -30,49 +75,35 @@ col1, col2 = st.columns(2)
 with col1:
     st.header("📥 Registrar Entrada")
     
-    # Formulário de Entrada
     with st.form(key='form_entrada', clear_on_submit=True):
         data_entrada = st.date_input("Data de Entrada", datetime.date.today())
         
-        # SUGESTÃO DE HORÁRIO ATUAL: Já deixa o horário atual escrito, mas você pode apagar e digitar por cima
         hora_atual_sugerida = datetime.datetime.now().strftime("%H:%M")
-        
-        # ALTERAÇÃO: Campo de texto para digitar o horário manualmente
         hora_entrada = st.text_input("Horário de Entrada (Ex: 19:30)", value=hora_atual_sugerida).strip()
         
-        # OBRIGATÓRIO: Placa
         placa = st.text_input("Placa do Veículo (Obrigatório)").upper().strip()
         
-        # OPCIONAIS: Peso e Nota Fiscal
         peso_entrada = st.text_input("Peso de Entrada (Opcional)").strip()
         numero_nota = st.text_input("Número da Nota Fiscal (Opcional)").strip()
         
         botao_salvar_entrada = st.form_submit_button(label='Confirmar Entrada')
 
-    # Lógica ao clicar em Salvar Entrada
     if botao_salvar_entrada:
-        if placa and hora_entrada:  # Valida se a placa e a hora foram informadas
+        if placa and hora_entrada:
             peso_final = peso_entrada if peso_entrada else "Não Informado"
             nota_final = numero_nota if numero_nota else "Não Informada"
             
-            # Monta a nova linha do veículo
-            nova_entrada = {
-                "Data_Entrada": str(data_entrada),
-                "Hora_Entrada": hora_entrada,
-                "Placa": placa,
-                "Peso_Entrada": peso_final,
-                "Nota_Fiscal": nota_final,
-                "Data_Saida": "",
-                "Hora_Saida": "",
-                "Status": "No Pátio"
-            }
+            # SALVAMENTO SALVO DIRETO NO BANCO ONLINE/PERMANENTE
+            conn = sqlite3.connect("dados_patio.db")
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO patio (Data_Entrada, Hora_Entrada, Placa, Peso_Entrada, Nota_Fiscal, Data_Saida, Hora_Saida, Status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (str(data_entrada), hora_entrada, placa, peso_final, nota_final, "", "", "No Pátio"))
+            conn.commit()
+            conn.close()
             
-            # Adiciona na tabela
-            st.session_state.base_dados = pd.concat(
-                [st.session_state.base_dados, pd.DataFrame([nova_entrada])], 
-                ignore_index=True
-            )
-            st.success(f"✅ Veículo {placa} registrado às {hora_entrada} com sucesso!")
+            st.success(f"✅ Veículo {placa} salvo permanentemente no sistema!")
             st.rerun()
         else:
             st.error("⚠️ Erro: A Placa e o Horário de Entrada são obrigatórios!")
@@ -83,50 +114,43 @@ with col1:
 with col2:
     st.header("📤 Registrar Saída")
     
-    # Filtra a tabela para mostrar APENAS quem ainda está "No Pátio"
-    veiculos_no_patio = st.session_state.base_dados[st.session_state.base_dados["Status"] == "No Pátio"]
+    # Filtra puxando do banco apenas quem está "No Pátio"
+    veiculos_no_patio = base_dados[base_dados["Status"] == "No Pátio"]
     
     if veiculos_no_patio.empty:
         st.info("Não há veículos no pátio aguardando saída no momento.")
     else:
-        # Monta a lista visual de seleção mostrando a placa e detalhes da entrada
         lista_selecao = veiculos_no_patio.apply(
             lambda r: f"{r['Placa']} (Entrada: {r['Data_Entrada']} às {r['Hora_Entrada']})", axis=1
         ).tolist()
         
-        # Formulário de Saída
         with st.form(key='form_saida'):
             opcao_selecionada = st.selectbox("Selecione o veículo que está saindo:", lista_selecao)
             
             data_saida = st.date_input("Data de Saída", datetime.date.today())
             
-            # SUGESTÃO DE HORÁRIO ATUAL PARA A SAÍDA
             hora_saida_sugerida = datetime.datetime.now().strftime("%H:%M")
-            
-            # ALTERAÇÃO: Campo de texto para digitar o horário de saída manualmente
             hora_saida = st.text_input("Horário de Saída (Ex: 22:45)", value=hora_saida_sugerida).strip()
             
             botao_confirmar_saida = st.form_submit_button(label='Confirmar Saída')
             
         if botao_confirmar_saida:
             if hora_saida:
-                # Separa o texto para conseguir a placa pura isolada
                 placa_saida = opcao_selecionada.split(" (")[0]
                 
-                # Encontra o índice exato desse veículo que está "No Pátio"
-                idx = st.session_state.base_dados[
-                    (st.session_state.base_dados["Placa"] == placa_saida) & 
-                    (st.session_state.base_dados["Status"] == "No Pátio")
-                ].index
+                # ATUALIZAÇÃO DIRETA NO BANCO DE DADOS PERMANENTE
+                conn = sqlite3.connect("dados_patio.db")
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE patio 
+                    SET Data_Saida = ?, Hora_Saida = ?, Status = ?
+                    WHERE Placa = ? AND Status = 'No Pátio'
+                """, (str(data_saida), hora_saida, "Liberado", placa_saida))
+                conn.commit()
+                conn.close()
                 
-                if len(idx) > 0:
-                    # Preenche a data e hora de saída digitadas e altera o status
-                    st.session_state.base_dados.loc[idx[0], "Data_Saida"] = str(data_saida)
-                    st.session_state.base_dados.loc[idx[0], "Hora_Saida"] = hora_saida
-                    st.session_state.base_dados.loc[idx[0], "Status"] = "Liberado"
-                    
-                    st.warning(f"🚩 Saída do veículo {placa_saida} confirmada às {hora_saida}!")
-                    st.rerun()
+                st.warning(f"🚩 Saída do veículo {placa_saida} gravada com sucesso!")
+                st.rerun()
             else:
                 st.error("⚠️ Erro: O Horário de Saída é obrigatório!")
 
@@ -136,23 +160,44 @@ with col2:
 st.write("---")
 st.header("📋 Monitoramento do Pátio & Relatórios")
 
-if st.session_state.base_dados.empty:
+if base_dados.empty:
     st.write("Nenhum veículo movimentado hoje.")
 else:
-    # Exibe a tabela completa em tempo real
-    st.dataframe(st.session_state.base_dados, use_container_width=True)
+    # Exibe a tabela completa em tempo real (Sem mostrar a coluna interna do 'id')
+    st.dataframe(base_dados.drop(columns=["id"], errors="ignore"), use_container_width=True)
     
-    # Cria o arquivo em memória para disponibilizar para download no navegador
+    # -------------------------------------------------------------------------
+    # GERAÇÃO DO ARQUIVO EXCEL COM HORAS DE DESCARREGAMENTO
+    # -------------------------------------------------------------------------
+    # Copia a base de dados para injetar o cálculo sem alterar a tabela visual pura
+    dados_excel = base_dados.copy()
+    
+    # Aplica a função de cálculo linha por linha nas colunas de hora
+    dados_excel["Tempo_Descarregamento"] = dados_excel.apply(
+        lambda row: calcular_tempo_descarregamento(row["Hora_Entrada"], row["Hora_Saida"]) if row["Status"] == "Liberado" else "No Pátio", axis=1
+    )
+    
+    # Remove a coluna id para ficar limpo no Excel
+    if "id" in dados_excel.columns:
+        dados_excel = dados_excel.drop(columns=["id"])
+        
+    # Reorganiza a ordem para que o Tempo de Descarregamento fique logo após a Hora de Saída
+    colunas_ordenadas = [
+        "Data_Entrada", "Hora_Entrada", "Placa", "Peso_Entrada", 
+        "Nota_Fiscal", "Data_Saida", "Hora_Saida", "Tempo_Descarregamento", "Status"
+    ]
+    dados_excel = dados_excel[colunas_ordenadas]
+
+    # Transforma em planilha Excel para download
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        st.session_state.base_dados.to_excel(writer, index=False, sheet_name='Controle_Patio')
+        dados_excel.to_excel(writer, index=False, sheet_name='Controle_Patio_Completo')
     
     buffer.seek(0)
     
-    # Botão azul nativo do Streamlit para baixar a planilha
     st.download_button(
-        label="📥 Baixar Relatório do Excel (.xlsx)",
+        label="📥 Baixar Relatório do Excel com Tempo de Descarregamento (.xlsx)",
         data=buffer,
-        file_name=f"relatorio_patio_{datetime.date.today()}.xlsx",
+        file_name=f"relatorio_patio_completo_{datetime.date.today()}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+    )
